@@ -1,0 +1,3 @@
+828,115,Hot Plasma
+650,298,Synchrotron Glow
+572,69,Ionized Gas

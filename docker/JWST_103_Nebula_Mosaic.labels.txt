@@ -1,0 +1,3 @@
+897,150,Pulsar Wind
+1206,86,Cosmic Dust
+658,345,Expanding Gas

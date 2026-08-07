@@ -1,0 +1,3 @@
+1160,275,Energy Jets
+946,225,Background Star
+684,347,Dust Clouds

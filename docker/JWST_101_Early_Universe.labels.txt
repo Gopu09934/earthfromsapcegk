@@ -1,0 +1,3 @@
+877,187,Pulsar
+423,90,Deep Space
+1204,472,Ionized Gas

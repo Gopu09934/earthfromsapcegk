@@ -1,0 +1,3 @@
+613,86,Ionized Gas
+949,520,Bright Star
+1191,154,Expanding Gas
