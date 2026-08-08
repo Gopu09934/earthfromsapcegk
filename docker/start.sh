@@ -94,10 +94,18 @@ is_youtube_url() {
 # nothing. Returns empty string on failure — caller must check.
 resolve_live_stream_url() {
     local page_url="$1"
-    local resolved=""
-    resolved=$(yt-dlp -g --no-warnings -f "$YTDLP_FORMAT" "$page_url" 2>/dev/null | head -1 || true)
+    local resolved="" err=""
+    err=$(yt-dlp -g -f "$YTDLP_FORMAT" "$page_url" 2>&1 >"$ASSET_DIR/.ytdlp_out")
+    resolved=$(head -1 "$ASSET_DIR/.ytdlp_out")
     if [ -z "$resolved" ]; then
-        resolved=$(yt-dlp -g --no-warnings -f "best" "$page_url" 2>/dev/null | head -1 || true)
+        echo "yt-dlp (format=${YTDLP_FORMAT}) produced no URL. stderr was:" >&2
+        echo "$err" >&2
+        err=$(yt-dlp -g -f "best" "$page_url" 2>&1 >"$ASSET_DIR/.ytdlp_out")
+        resolved=$(head -1 "$ASSET_DIR/.ytdlp_out")
+        if [ -z "$resolved" ]; then
+            echo "yt-dlp (format=best) also produced no URL. stderr was:" >&2
+            echo "$err" >&2
+        fi
     fi
     echo "$resolved"
 }
@@ -871,10 +879,13 @@ for u in "${URLS[@]}"; do
         echo "Detected live YouTube source: $u"
     fi
 done
-if [ "$NEEDS_YTDLP" = true ] && ! command -v yt-dlp >/dev/null 2>&1; then
-    echo "ERROR: yt-dlp is required to resolve YouTube live URLs but is not installed."
-    echo "Install it with: pip install -U yt-dlp   (add --break-system-packages if needed)"
-    exit 1
+if [ "$NEEDS_YTDLP" = true ]; then
+    if ! command -v yt-dlp >/dev/null 2>&1; then
+        echo "ERROR: yt-dlp is required to resolve YouTube live URLs but is not installed."
+        echo "Install it with: pip install -U yt-dlp   (add --break-system-packages if needed)"
+        exit 1
+    fi
+    echo "yt-dlp version: $(yt-dlp --version 2>&1)"
 fi
 
 # Shuffle playback order fresh for every workflow run, so the sequence
