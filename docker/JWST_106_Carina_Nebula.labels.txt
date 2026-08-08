@@ -1,3 +1,0 @@
-434,99,Cosmic Dust
-387,399,Pulsar Wind
-624,100,Ionized Gas
