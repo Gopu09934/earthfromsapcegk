@@ -1,3 +1,0 @@
-912,501,Neutron Star
-838,305,Dust Clouds
-652,337,Deep Space
