@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Earth From Orbit — Live ISS Feed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* ============================================================
+     TOKENS
+     bg-void      #0A0D12  base — near-black, slight blue (orbital night)
+     bg-panel     #11151D  panel surface, one step up from void
+     bg-panel-2   #171C26  nested surface (cards inside panels)
+     line         #232A38  hairline dividers / borders
+     amber        #E8A33D  telemetry / signal accent (primary)
+     teal         #52D3C5  secondary data accent (orbit readouts)
+     signal-red   #E8453C  LIVE indicator only — never decorative
+     ink          #EDEFF3  primary text
+     ink-dim      #8B93A5  secondary / caption text
+     Display: Space Grotesk — technical grotesk, justified by subject
+     Data:    IBM Plex Mono — telemetry readouts, clock, coordinates
+     Body:    IBM Plex Sans — ticker, facts, running text
+     Signature element: the live orbital telemetry strip — real,
+     computed values (elapsed mission time, orbit count, avg speed/
+     altitude), not decorative chrome.
+     ============================================================ */
+  :root{
+    --bg-void:#0A0D12;
+    --bg-panel:#11151D;
+    --bg-panel-2:#171C26;
+    --line:#232A38;
+    --amber:#E8A33D;
+    --teal:#52D3C5;
+    --signal-red:#E8453C;
+    --ink:#EDEFF3;
+    --ink-dim:#8B93A5;
+  }
+
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; }
+  body{
+    background:var(--bg-void);
+    color:var(--ink);
+    font-family:'IBM Plex Sans', sans-serif;
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+  }
+  a{ color:inherit; }
+  :focus-visible{
+    outline:2px solid var(--amber);
+    outline-offset:2px;
+  }
+
+  /* ---------------- Top bar ---------------- */
+  .topbar{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:14px 22px;
+    border-bottom:1px solid var(--line);
+    gap:16px;
+    flex-wrap:wrap;
+  }
+  .brand{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    font-family:'Space Grotesk', sans-serif;
+  }
+  .live-dot{
+    width:9px; height:9px; border-radius:50%;
+    background:var(--signal-red);
+    animation:pulse 1.6s ease-in-out infinite;
+    flex-shrink:0;
+  }
+  @keyframes pulse{
+    0%,100%{ opacity:1; }
+    50%{ opacity:.25; }
+  }
+  .brand-text{
+    font-weight:700;
+    font-size:15px;
+    letter-spacing:.08em;
+  }
+  .brand-sub{
+    font-size:11px;
+    color:var(--ink-dim);
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    margin-top:1px;
+  }
+  .topbar-right{
+    display:flex;
+    align-items:center;
+    gap:20px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    color:var(--ink-dim);
+  }
+  .clock{ color:var(--amber); }
+  .credit{ font-size:11px; }
+
+  /* ---------------- Camera tabs ---------------- */
+  .camtabs{
+    display:flex;
+    gap:2px;
+    padding:0 22px;
+    border-bottom:1px solid var(--line);
+    background:var(--bg-panel);
+  }
+  .camtab{
+    appearance:none;
+    background:transparent;
+    border:none;
+    border-bottom:2px solid transparent;
+    color:var(--ink-dim);
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    letter-spacing:.08em;
+    text-transform:uppercase;
+    padding:12px 4px;
+    margin-right:26px;
+    cursor:pointer;
+  }
+  .camtab:hover{ color:var(--ink); }
+  .camtab.active{
+    color:var(--amber);
+    border-bottom-color:var(--amber);
+  }
+
+  /* ---------------- Main layout ---------------- */
+  main{
+    flex:1;
+    display:grid;
+    grid-template-columns:minmax(0,1fr) 320px;
+    gap:1px;
+    background:var(--line);
+  }
+  @media (max-width:860px){
+    main{ grid-template-columns:1fr; }
+  }
+
+  .stage{
+    background:var(--bg-void);
+    padding:22px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+  }
+  .frame{
+    width:100%;
+    max-width:1040px;
+    position:relative;
+  }
+  .frame-bezel{
+    position:relative;
+    aspect-ratio:16/9;
+    background:#000;
+    border:1px solid var(--line);
+    border-radius:2px;
+    overflow:hidden;
+  }
+  .frame-bezel iframe{
+    width:100%;
+    height:100%;
+    border:0;
+    display:block;
+  }
+  /* corner brackets — viewfinder motif, restrained */
+  .bracket{
+    position:absolute;
+    width:18px; height:18px;
+    border:2px solid var(--amber);
+    opacity:.85;
+    pointer-events:none;
+  }
+  .bracket.tl{ top:8px; left:8px; border-right:none; border-bottom:none; }
+  .bracket.tr{ top:8px; right:8px; border-left:none; border-bottom:none; }
+  .bracket.bl{ bottom:8px; left:8px; border-right:none; border-top:none; }
+  .bracket.br{ bottom:8px; right:8px; border-left:none; border-top:none; }
+
+  .frame-caption{
+    display:flex;
+    justify-content:space-between;
+    align-items:baseline;
+    margin-top:10px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    color:var(--ink-dim);
+    letter-spacing:.04em;
+  }
+  .frame-caption strong{
+    color:var(--ink);
+    font-family:'Space Grotesk', sans-serif;
+    font-size:15px;
+    font-weight:600;
+    letter-spacing:0;
+    display:block;
+    margin-bottom:2px;
+  }
+
+  /* ---------------- Side rail ---------------- */
+  .rail{
+    background:var(--bg-panel);
+    padding:20px;
+    display:flex;
+    flex-direction:column;
+    gap:20px;
+    overflow-y:auto;
+  }
+  .rail-section-label{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    color:var(--amber);
+    display:flex;
+    align-items:center;
+    gap:8px;
+  }
+  .rail-section-label::after{
+    content:'';
+    flex:1;
+    height:1px;
+    background:var(--line);
+  }
+
+  /* Telemetry — the signature element */
+  .telemetry{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:10px;
+  }
+  .tstat{
+    background:var(--bg-panel-2);
+    border:1px solid var(--line);
+    border-radius:2px;
+    padding:10px 12px;
+  }
+  .tstat-label{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:10px;
+    letter-spacing:.1em;
+    text-transform:uppercase;
+    color:var(--ink-dim);
+    margin-bottom:4px;
+  }
+  .tstat-value{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:17px;
+    font-weight:500;
+    color:var(--teal);
+    font-variant-numeric:tabular-nums;
+  }
+  .tstat-unit{
+    font-size:11px;
+    color:var(--ink-dim);
+    margin-left:3px;
+  }
+  .telemetry-note{
+    font-size:10.5px;
+    color:var(--ink-dim);
+    line-height:1.5;
+    grid-column:1/-1;
+  }
+
+  /* Fact card */
+  .fact-card{
+    background:var(--bg-panel-2);
+    border:1px solid var(--line);
+    border-left:3px solid var(--amber);
+    border-radius:2px;
+    padding:14px 16px;
+    min-height:92px;
+    display:flex;
+    align-items:center;
+  }
+  .fact-text{
+    font-size:13.5px;
+    line-height:1.55;
+    color:var(--ink);
+    transition:opacity .5s ease;
+  }
+  .fact-text.fade{ opacity:0; }
+
+  /* Headlines list (compact, scannable) */
+  .headline-list{
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+  }
+  .headline-item{
+    display:flex;
+    gap:10px;
+    font-size:13px;
+    line-height:1.5;
+    color:var(--ink-dim);
+    padding-bottom:10px;
+    border-bottom:1px solid var(--line);
+  }
+  .headline-item:last-child{ border-bottom:none; padding-bottom:0; }
+  .headline-item.current{ color:var(--ink); }
+  .headline-dot{
+    width:5px; height:5px; border-radius:50%;
+    background:var(--line);
+    margin-top:6px;
+    flex-shrink:0;
+  }
+  .headline-item.current .headline-dot{ background:var(--amber); }
+
+  /* ---------------- Bottom ticker ---------------- */
+  .ticker-bar{
+    border-top:1px solid var(--line);
+    background:var(--bg-panel);
+    display:flex;
+    align-items:stretch;
+    overflow:hidden;
+  }
+  .ticker-tag{
+    background:var(--amber);
+    color:#0A0D12;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    font-weight:600;
+    letter-spacing:.08em;
+    display:flex;
+    align-items:center;
+    padding:0 16px;
+    flex-shrink:0;
+  }
+  .ticker-track{
+    flex:1;
+    overflow:hidden;
+    position:relative;
+    display:flex;
+    align-items:center;
+  }
+  .ticker-content{
+    display:inline-flex;
+    white-space:nowrap;
+    padding-left:100%;
+    animation:scroll-left 42s linear infinite;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12.5px;
+    color:var(--ink-dim);
+    padding-top:11px;
+    padding-bottom:11px;
+  }
+  .ticker-content span{ margin-right:36px; }
+  @keyframes scroll-left{
+    0%{ transform:translateX(0); }
+    100%{ transform:translateX(-100%); }
+  }
+
+  @media (prefers-reduced-motion:reduce){
+    .live-dot{ animation:none; }
+    .ticker-content{ animation:none; padding-left:0; }
+  }
+
+  @media (max-width:860px){
+    .rail{ max-height:none; }
+  }
+</style>
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="live-dot" aria-hidden="true"></span>
+      <div>
+        <div class="brand-text">EARTH FROM ORBIT</div>
+        <div class="brand-sub">Live orbital feed</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="credit">Source: NASA</span>
+      <span class="clock" id="clock">— — : — — : — — UTC</span>
+    </div>
+  </header>
+
+  <nav class="camtabs" role="tablist" aria-label="Camera selection">
+    <button class="camtab active" id="tab-station" role="tab" aria-selected="true">Station View</button>
+    <button class="camtab" id="tab-earth" role="tab" aria-selected="false">Earth View</button>
+  </nav>
+
+  <main>
+    <section class="stage">
+      <div class="frame">
+        <div class="frame-bezel">
+          <div class="bracket tl" aria-hidden="true"></div>
+          <div class="bracket tr" aria-hidden="true"></div>
+          <div class="bracket bl" aria-hidden="true"></div>
+          <div class="bracket br" aria-hidden="true"></div>
+          <iframe
+            id="player"
+            src="https://www.youtube-nocookie.com/embed/awQzjn72bI0?autoplay=1&mute=1&rel=0"
+            title="Live video from the International Space Station"
+            allow="autoplay; encrypted-media; picture-in-picture"
+            allowfullscreen
+          ></iframe>
+        </div>
+        <div class="frame-caption">
+          <div>
+            <strong id="frame-title">Station View</strong>
+            <span id="frame-desc">Live interior and exterior views from the ISS crew feed</span>
+          </div>
+          <span>NASA · Official Stream</span>
+        </div>
+      </div>
+    </section>
+
+    <aside class="rail">
+      <div>
+        <div class="rail-section-label">Orbital telemetry</div>
+        <div class="telemetry" style="margin-top:12px;">
+          <div class="tstat">
+            <div class="tstat-label">Altitude</div>
+            <div class="tstat-value">408<span class="tstat-unit">km</span></div>
+          </div>
+          <div class="tstat">
+            <div class="tstat-label">Speed</div>
+            <div class="tstat-value">27,600<span class="tstat-unit">km/h</span></div>
+          </div>
+          <div class="tstat">
+            <div class="tstat-label">Orbits today</div>
+            <div class="tstat-value" id="orbit-count">—</div>
+          </div>
+          <div class="tstat">
+            <div class="tstat-label">Mission day</div>
+            <div class="tstat-value" id="mission-day">—</div>
+          </div>
+          <div class="telemetry-note">
+            Altitude and speed are typical operating values. Orbit count and mission day are calculated live from an orbital period of ~92.7 minutes and continuous crewed occupation since Nov 2, 2000.
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="rail-section-label">Did you know</div>
+        <div class="fact-card" style="margin-top:12px;">
+          <div class="fact-text" id="fact-text"></div>
+        </div>
+      </div>
+
+      <div>
+        <div class="rail-section-label">Today's discovery</div>
+        <div class="headline-list" id="headline-list" style="margin-top:12px;"></div>
+      </div>
+    </aside>
+  </main>
+
+  <div class="ticker-bar">
+    <div class="ticker-tag">BULLETIN</div>
+    <div class="ticker-track">
+      <div class="ticker-content" id="ticker-content"></div>
+    </div>
+  </div>
+
+<script>
+  // ---------- Clock ----------
+  function pad(n){ return String(n).padStart(2,'0'); }
+  function tickClock(){
+    const d = new Date();
+    const s = pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+':'+pad(d.getUTCSeconds())+' UTC';
+    document.getElementById('clock').textContent = s;
+  }
+  tickClock();
+  setInterval(tickClock, 1000);
+
+  // ---------- Telemetry (real, computed) ----------
+  const ORBITAL_PERIOD_MIN = 92.68; // average ISS orbital period
+  const CREWED_SINCE = new Date('2000-11-02T00:00:00Z');
+
+  function updateTelemetry(){
+    const now = new Date();
+    const msSinceCrewed = now - CREWED_SINCE;
+    const missionDay = Math.floor(msSinceCrewed / 86400000);
+    const minutesToday = (now.getUTCHours()*60) + now.getUTCMinutes() + (now.getUTCSeconds()/60);
+    const orbitsToday = Math.floor(minutesToday / ORBITAL_PERIOD_MIN) + 1;
+    document.getElementById('mission-day').textContent = missionDay.toLocaleString();
+    document.getElementById('orbit-count').textContent = orbitsToday;
+  }
+  updateTelemetry();
+  setInterval(updateTelemetry, 15000);
+
+  // ---------- Facts ----------
+  const FACTS = [
+    "The ISS completes roughly 16 orbits of Earth every day, at about 408 km altitude.",
+    "The Space Station travels at nearly 27,600 km/h — fast enough to circle Earth in about 93 minutes.",
+    "Astronauts aboard the ISS see a sunrise or sunset roughly every 45 minutes.",
+    "The ISS has been continuously crewed since November 2, 2000.",
+    "The Station's solar arrays span roughly the length of a football field.",
+    "Five space agencies — NASA, Roscosmos, ESA, JAXA, and CSA — jointly operate the ISS.",
+    "When the Station passes into Earth's shadow, external camera views go dark until the next sunrise.",
+    "Astronauts exercise about two hours a day to help offset bone and muscle loss in microgravity.",
+    "Mission Control tracks the ISS around the clock from stations on the ground."
+  ];
+  let factIndex = 0;
+  const factEl = document.getElementById('fact-text');
+  function showFact(i){
+    factEl.classList.add('fade');
+    setTimeout(()=>{
+      factEl.textContent = FACTS[i];
+      factEl.classList.remove('fade');
+    }, 400);
+  }
+  showFact(0);
+  setInterval(()=>{
+    factIndex = (factIndex + 1) % FACTS.length;
+    showFact(factIndex);
+  }, 8000);
+
+  // ---------- Headlines ----------
+  const HEADLINES = [
+    "You're watching a live camera feed from the International Space Station in low Earth orbit.",
+    "Views shift constantly as the Station passes over oceans, continents, and city lights.",
+    "During orbital night, the feed may briefly go dark until the Station returns to sunlight.",
+    "This is the same live signal NASA streams from the Station's external and interior cameras."
+  ];
+  const headlineListEl = document.getElementById('headline-list');
+  let currentHeadline = 0;
+  function renderHeadlines(){
+    headlineListEl.innerHTML = '';
+    HEADLINES.forEach((h, i)=>{
+      const item = document.createElement('div');
+      item.className = 'headline-item' + (i === currentHeadline ? ' current' : '');
+      const dot = document.createElement('div');
+      dot.className = 'headline-dot';
+      const text = document.createElement('div');
+      text.textContent = h;
+      item.appendChild(dot);
+      item.appendChild(text);
+      headlineListEl.appendChild(item);
+    });
+  }
+  renderHeadlines();
+  setInterval(()=>{
+    currentHeadline = (currentHeadline + 1) % HEADLINES.length;
+    renderHeadlines();
+  }, 6000);
+
+  // ---------- Ticker ----------
+  const tickerEl = document.getElementById('ticker-content');
+  const tickerText = HEADLINES.map(h => '<span>'+h+'</span>').join('•');
+  tickerEl.innerHTML = tickerText + '•' + tickerText;
+
+  // ---------- Camera switcher ----------
+  const CAMERAS = {
+    station: {
+      id: 'awQzjn72bI0',
+      title: 'Station View',
+      desc: 'Live interior and exterior views from the ISS crew feed'
+    },
+    earth: {
+      id: 'M3HKLzjvKPc',
+      title: 'Earth View',
+      desc: 'Live external camera on the Harmony module, looking down at Earth'
+    }
+  };
+  const player = document.getElementById('player');
+  const frameTitle = document.getElementById('frame-title');
+  const frameDesc = document.getElementById('frame-desc');
+  const tabStation = document.getElementById('tab-station');
+  const tabEarth = document.getElementById('tab-earth');
+
+  function setCamera(key){
+    const cam = CAMERAS[key];
+    player.src = 'https://www.youtube-nocookie.com/embed/' + cam.id + '?autoplay=1&mute=1&rel=0';
+    frameTitle.textContent = cam.title;
+    frameDesc.textContent = cam.desc;
+    tabStation.classList.toggle('active', key === 'station');
+    tabStation.setAttribute('aria-selected', key === 'station');
+    tabEarth.classList.toggle('active', key === 'earth');
+    tabEarth.setAttribute('aria-selected', key === 'earth');
+  }
+  tabStation.addEventListener('click', ()=>setCamera('station'));
+  tabEarth.addEventListener('click', ()=>setCamera('earth'));
+
+  // ---------- Auto-rotate cameras (for unattended/broadcast use) ----------
+  // When this page is the source for a 24/7 capture-and-restream setup,
+  // nothing external drives it — so the page rotates itself.
+  const ROTATE_KEYS = ['station', 'earth'];
+  const ROTATE_MS = 25 * 60 * 1000; // 25 minutes per camera
+  let rotateIndex = 0;
+  setInterval(()=>{
+    rotateIndex = (rotateIndex + 1) % ROTATE_KEYS.length;
+    setCamera(ROTATE_KEYS[rotateIndex]);
+  }, ROTATE_MS);
+</script>
+
+</body>
+</html>
