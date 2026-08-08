@@ -1,3 +1,0 @@
-920,352,Dust Clouds
-580,428,Background Star
-1037,90,Hot Plasma
