@@ -1,3 +1,0 @@
-739,128,Ionized Gas
-1024,314,Supernova Debris
-414,233,Energy Jets
