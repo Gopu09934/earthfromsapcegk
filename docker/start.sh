@@ -6,9 +6,9 @@ if [ -z "${YOUTUBE_STREAM_KEY:-}" ]; then
     exit 1
 fi
 
-RES_W=1280
-RES_H=720
-FPS=30
+RES_W=960
+RES_H=540
+FPS=24
 DISPLAY_NUM=99
 export DISPLAY=":${DISPLAY_NUM}"
 
@@ -90,20 +90,22 @@ while [ "$attempt" -le "$MAX_RETRIES" ]; do
     ffmpeg \
         -hide_banner \
         -loglevel warning \
+        -thread_queue_size 1024 \
         -f x11grab \
         -video_size "${RES_W}x${RES_H}" \
         -framerate "$FPS" \
         -i "$DISPLAY" \
+        -thread_queue_size 1024 \
         -f lavfi -i anullsrc=r=48000:cl=stereo \
         -c:v libx264 \
         -preset ultrafast \
         -tune zerolatency \
         -pix_fmt yuv420p \
-        -b:v 3000k \
-        -maxrate 3000k \
-        -bufsize 6000k \
-        -g 60 \
-        -keyint_min 60 \
+        -b:v 1800k \
+        -maxrate 1800k \
+        -bufsize 3600k \
+        -g 48 \
+        -keyint_min 48 \
         -sc_threshold 0 \
         -c:a aac \
         -b:a 128k \
