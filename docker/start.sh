@@ -57,21 +57,62 @@ SUB_ICON_Y=677
 SUB_ICON_R=20
 
 #############################################
+# Documentary look — cinematic grade / grain /
+# letterbox toggles. All optional and cheap
+# enough for a 2-core runner at 720p.
+#############################################
+ENABLE_CINE_GRADE=true     # subtle contrast/saturation lift + vignette
+ENABLE_FILM_GRAIN=true     # very light noise, broadcast-doc texture
+FILM_GRAIN_STRENGTH=4      # keep low (2-6) — cost scales with this
+ENABLE_LETTERBOX=true      # thin cinematic bars top/bottom
+LETTERBOX_H=26
+
+#############################################
+# Live YouTube source handling
+#############################################
+# Any VIDEO_URL entry that looks like a YouTube page (not a direct
+# media file) is treated as a LIVE source: resolved to a real,
+# ffmpeg-readable stream URL via yt-dlp immediately before each
+# attempt (signed URLs expire, so this happens per-attempt, not once
+# at startup), streamed for SEGMENT_SECONDS, then handed off to the
+# next entry in the rotation (with a bumper in between, same as any
+# other video). Regular direct-file URLs behave exactly as before —
+# probed for real duration, read with -re, no yt-dlp involved.
+SEGMENT_SECONDS="${SEGMENT_SECONDS:-1500}"   # 25 min per live source before rotating
+YTDLP_FORMAT="${YTDLP_FORMAT:-best[protocol^=m3u8]/best}"
+
+is_youtube_url() {
+    case "$1" in
+        *youtube.com/watch*|*youtu.be/*|*youtube.com/live/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Resolves a YouTube page URL to a direct, ffmpeg-consumable stream
+# URL. Tries the HLS-preferring format first (best for long-running
+# live ingestion), falls back to plain "best" if that selector finds
+# nothing. Returns empty string on failure — caller must check.
+resolve_live_stream_url() {
+    local page_url="$1"
+    local resolved=""
+    resolved=$(yt-dlp -g --no-warnings -f "$YTDLP_FORMAT" "$page_url" 2>/dev/null | head -1 || true)
+    if [ -z "$resolved" ]; then
+        resolved=$(yt-dlp -g --no-warnings -f "best" "$page_url" 2>/dev/null | head -1 || true)
+    fi
+    echo "$resolved"
+}
+
+#############################################
 # Up-next bumper (shown between videos)
 #############################################
 ENABLE_BUMPER=true
 BUMPER_DURATION=5   # seconds
 BUMPER_MESSAGES=(
-    "Stay tuned for more breathtaking views of the Universe."
-    "Discover the latest wonders revealed by the James Webb Space Telescope."
-    "Our journey through deep space continues in just a moment."
-    "Exploring distant galaxies, stars, and cosmic mysteries."
-    "More incredible discoveries from the edge of the observable Universe."
-    "Witness the beauty of the cosmos through the eyes of Webb."
-    "Every observation brings us closer to understanding our cosmic origins."
-    "Prepare for another unforgettable journey across space and time."
-    "New cosmic wonders are waiting just beyond the next frame."
-    "Thank you for exploring the Universe with us. More amazing views are coming soon."
+    "Stay tuned for more breathtaking views from orbit."
+    "Our journey around planet Earth continues in just a moment."
+    "Another live vantage point from space is coming up next."
+    "Every orbit brings a new view of our home planet."
+    "Thank you for watching Earth from above with us. More live views are coming soon."
 )
 
 #############################################
@@ -84,32 +125,20 @@ mkdir -p "$ASSET_DIR"
 
 #############################################
 # Generate the coordinate-label marker dot once
-# at startup: a small transparent PNG with a
-# gold-filled center and white ring, matching
-# the panel's gold accent color. Used by
-# build_labels_chain() as ffmpeg input index 2.
-# Always generated (cheap, one frame, 20x20) —
-# harmless/unused by ffmpeg on videos that don't
-# have a matching .labels.txt file.
+# at startup (unchanged from original — see
+# build_labels_chain() below).
 #############################################
 DOT_MARKER="dot_marker.png"
 GOLD_R=232; GOLD_G=163; GOLD_B=61
 DOT_VF="format=rgba,geq=r=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_R}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):g=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_G}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):b=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_B}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):a=(if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))"
 ffmpeg -y -f lavfi -i "color=c=black@0.0:s=20x20" -vf "$DOT_VF" -frames:v 1 "$DOT_MARKER" -loglevel error
 if [ ! -s "$DOT_MARKER" ]; then
-    # Guarantee the file always exists and is a valid PNG, even in the
-    # unlikely case the geq-based generation above fails — this is what
-    # gets passed to ffmpeg as a real input on every stream start, so it
-    # must never be missing. Falls back to an invisible 1x1 transparent
-    # pixel (labels would render without a visible dot, but the stream
-    # itself keeps running instead of crashing on a missing input file).
     echo "WARNING: geq-based marker generation failed — using a blank 1x1 fallback."
     echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" | base64 -d > "$DOT_MARKER"
 fi
 
 #############################################
-# Background clock writer (avoids fragile
-# drawtext %{gmtime} expansion syntax)
+# Background clock writer
 #############################################
 date -u +'%d %b %Y  •  %H:%M:%S UTC' > "$ASSET_DIR/clock.txt"
 (
@@ -123,9 +152,6 @@ CLOCK_PID=$!
 
 #############################################
 # Background subscriber-count writer
-# (polls YouTube Data API every 60s — subs
-# don't change second to second, and this
-# respects API quota)
 #############################################
 printf ' ' > "$ASSET_DIR/subs.txt"
 SUBS_PID=""
@@ -136,18 +162,11 @@ if [ "$SHOW_STATS" = true ]; then
             RESP=$(curl -s "https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${YOUTUBE_CHANNEL_ID}&key=${YOUTUBE_API_KEY}" || true)
             COUNT=$(echo "$RESP" | grep -o '"subscriberCount"[^"]*"[0-9]*"' | grep -oE '[0-9]+')
             if [ -n "$COUNT" ]; then
-                # Manual comma insertion — locale-independent, so it works
-                # the same regardless of the container's default locale
-                # (printf "%'d" silently fails to group digits under the
-                # bare "C" locale that Ubuntu containers ship with).
                 FORMATTED=$(echo "$COUNT" | rev | sed 's/\(...\)/\1,/g' | rev | sed 's/^,//')
                 printf '%s subscribers' "$FORMATTED" > "$ASSET_DIR/subs.txt.tmp"
                 mv -f "$ASSET_DIR/subs.txt.tmp" "$ASSET_DIR/subs.txt"
                 WARNED_ONCE=false
             elif [ "$WARNED_ONCE" = false ]; then
-                # Log the raw response once so it shows up in the Actions
-                # log — this tells us exactly why the count isn't parsing
-                # (bad channel ID, disabled API, quota, key restrictions, etc.)
                 echo "WARNING: could not parse subscriberCount from API response. Raw response:"
                 echo "$RESP"
                 WARNED_ONCE=true
@@ -160,12 +179,6 @@ fi
 
 #############################################
 # Background live-viewer-count writer
-# Strategy: find the channel's currently-live
-# video once (search.list — costs more quota,
-# so only called when we don't already have an
-# id), then poll videos.list (cheap, 1 unit)
-# every 30s for concurrentViewers. If the
-# broadcast ends/restarts, re-search.
 #############################################
 printf ' ' > "$ASSET_DIR/viewers.txt"
 VIEWERS_PID=""
@@ -184,12 +197,9 @@ if [ "$SHOW_STATS" = true ]; then
                     printf '%s watching now' "$VIEWERS" > "$ASSET_DIR/viewers.txt.tmp"
                     mv -f "$ASSET_DIR/viewers.txt.tmp" "$ASSET_DIR/viewers.txt"
                 elif [ -n "$VIEWERS" ]; then
-                    # Below the display threshold — keep the panel blank
-                    # rather than showing a small/discouraging number.
                     printf ' ' > "$ASSET_DIR/viewers.txt.tmp"
                     mv -f "$ASSET_DIR/viewers.txt.tmp" "$ASSET_DIR/viewers.txt"
                 else
-                    # Broadcast ended or hasn't registered yet — clear and re-search.
                     LIVE_VIDEO_ID=""
                     printf ' ' > "$ASSET_DIR/viewers.txt"
                 fi
@@ -204,134 +214,69 @@ trap 'kill "$CLOCK_PID" 2>/dev/null || true; [ -n "$SUBS_PID" ] && kill "$SUBS_P
 
 #############################################
 # Static panel text (unchanged across videos)
+# — updated defaults to match a live-Earth-
+# observation feed instead of Webb, since
+# that's what's being streamed now. Override
+# any of these via env vars if you mix in
+# other content later.
 #############################################
-printf 'J A M E S   W E B B'              > "$ASSET_DIR/title1.txt"
-printf 'S P A C E   T E L E S C O P E'    > "$ASSET_DIR/title2.txt"
-printf "T O D A Y ' S   D I S C O V E R Y" > "$ASSET_DIR/header.txt"
-printf 'DEEP SPACE REPORT'                > "$ASSET_DIR/eyebrow.txt"
-printf 'SUBSCRIBE for daily space discoveries' > "$ASSET_DIR/cta.txt"
+PANEL_TITLE1="${PANEL_TITLE1:-L I V E   F R O M}"
+PANEL_TITLE2="${PANEL_TITLE2:-T H E   S P A C E   S T A T I O N}"
+PANEL_HEADER="${PANEL_HEADER:-E A R T H   F R O M   O R B I T}"
+PANEL_EYEBROW="${PANEL_EYEBROW:-LIVE ORBITAL FEED}"
+PANEL_CREDIT="${PANEL_CREDIT:-Credits\\: NASA}"
+
+printf '%s' "$PANEL_TITLE1"  > "$ASSET_DIR/title1.txt"
+printf '%s' "$PANEL_TITLE2"  > "$ASSET_DIR/title2.txt"
+printf '%s' "$PANEL_HEADER"  > "$ASSET_DIR/header.txt"
+printf '%s' "$PANEL_EYEBROW" > "$ASSET_DIR/eyebrow.txt"
+printf 'SUBSCRIBE for daily views from space' > "$ASSET_DIR/cta.txt"
 printf 'DID YOU KNOW' > "$ASSET_DIR/fact_label.txt"
 
 #############################################
-# Default headline / fact pools (used as a
-# last resort if galaxy_info.txt / facts.txt
-# are missing or empty)
+# Default headline / fact pools — a mix of
+# general space facts plus ISS-specific ones,
+# since the two configured sources are the
+# NASA ISS live feeds.
 #############################################
 DEFAULT_HEADLINES=(
-    "The James Webb Space Telescope is capturing the deepest infrared views of the early Universe ever recorded."
-    "Webb has detected galaxies that formed just a few hundred million years after the Big Bang."
-    "Scientists are using Webb to analyze the atmospheres of distant exoplanets with unprecedented precision."
-    "Powerful infrared observations are revealing stars being born inside dense clouds of cosmic dust."
-    "Astronomers are studying supermassive black holes that existed surprisingly early in cosmic history."
-    "Webb is helping researchers understand how galaxies grew and evolved across billions of years."
-    "New observations are uncovering complex organic molecules in star-forming regions throughout the Milky Way."
-    "Planetary systems around distant stars are showing remarkable diversity in size, composition, and structure."
-    "The Euclid mission is creating the largest 3D map of the Universe to investigate dark matter and dark energy."
-    "The Vera C. Rubin Observatory is expected to transform astronomy with its wide-field survey of the southern sky."
-    "Gravitational wave observatories are detecting collisions between black holes and neutron stars across the cosmos."
-    "NASA and international space missions continue expanding our understanding of planets, stars, galaxies, and Universe."
-    "Webb is observing protoplanetary disks where new planets are actively forming around young stars."
-    "Astronomers continue discovering ancient galaxies that challenge existing models of the early Universe."
-    "Every new Webb observation provides valuable insights into the history, evolution, and future of our cosmos."
+    "You are watching a live camera feed from the International Space Station in low Earth orbit."
+    "The ISS orbits Earth roughly every 90 minutes, meaning the crew sees a sunrise or sunset about every 45 minutes."
+    "The Space Station travels at approximately 28,000 kilometers per hour, or about 7.7 kilometers every second."
+    "The International Space Station has been continuously inhabited by rotating crews since November 2000."
+    "The ISS orbits at an altitude of roughly 400 kilometers above the Earth's surface."
+    "Astronauts aboard the Station conduct scientific research across biology, physics, astronomy, and materials science."
+    "The Space Station is a joint project between NASA, Roscosmos, ESA, JAXA, and the Canadian Space Agency."
+    "Views from the ISS cameras shift constantly as the Station passes over oceans, continents, and city lights."
+    "During orbital night, the cameras may briefly show a dark screen until the Station passes back into sunlight."
+    "The Space Station is roughly the size of a football field, including its solar arrays."
+    "Every 24 hours, the ISS completes about 16 full orbits of planet Earth."
+    "Live views like this one help people around the world see Earth the way astronauts do."
 )
 
 DEFAULT_FACTS=(
-    "The Universe is approximately 13.8 billion years old."
+    "The International Space Station orbits Earth at about 400 kilometers altitude."
+    "The ISS completes roughly 16 orbits of Earth every single day."
+    "Astronauts aboard the ISS experience around 16 sunrises and 16 sunsets daily."
+    "The Space Station travels at nearly 28,000 kilometers per hour."
+    "The ISS has been continuously staffed by astronauts since November 2000."
+    "The Space Station's solar arrays span roughly the length of a football field."
+    "Water aboard the ISS is heavily recycled, including moisture from the cabin air."
+    "Astronauts on the ISS follow a structured daily exercise routine to offset bone and muscle loss in microgravity."
+    "The ISS travels far enough in one day to circle the Earth about 16 times over."
+    "Mission Control communicates with the ISS crew around the clock from stations on the ground."
+    "The Space Station is a collaboration between five space agencies: NASA, Roscosmos, ESA, JAXA, and CSA."
     "A light-year is the distance light travels in one year, about 9.46 trillion kilometers."
+    "The Universe is approximately 13.8 billion years old."
+    "The Moon moves about 3.8 centimeters farther from Earth every year."
+    "Auroras occur when charged particles from the Sun interact with Earth's upper atmosphere."
+    "Earth's atmosphere, visible as a thin blue line from orbit, protects all known life."
     "The James Webb Space Telescope observes the Universe primarily in infrared light."
-    "Webb has detected galaxies that formed only a few hundred million years after the Big Bang."
-    "Scientists use Webb to study the atmospheres of distant exoplanets in remarkable detail."
-    "Webb is revealing stars forming inside dense clouds of gas and cosmic dust."
-    "Astronomers are discovering massive black holes that existed much earlier than previously expected."
-    "The Euclid space telescope is mapping billions of galaxies to study dark matter and dark energy."
-    "The Vera C. Rubin Observatory will survey the southern sky and discover millions of new celestial objects."
-    "The Milky Way contains hundreds of billions of stars."
-    "The observable Universe contains billions of galaxies."
-    "The Sun contains about 99.8 percent of the total mass in our solar system."
-    "Jupiter is the largest planet in our solar system."
-    "Mars is home to Olympus Mons, the largest volcano in the solar system."
-    "Saturn's rings are composed mostly of ice particles with smaller amounts of rock and dust."
-    "Venus is the hottest planet in our solar system because of its dense carbon dioxide atmosphere."
-    "Mercury experiences the largest temperature variations of any planet in the solar system."
-    "Neptune has the fastest winds recorded on any planet, reaching over 2,000 kilometers per hour."
-    "Uranus rotates on its side, likely because of a massive collision early in its history."
-    "Earth is the only known planet confirmed to support life."
-    "The Moon moves about 3.8 centimeters farther away from Earth each year."
-    "The International Space Station travels around Earth at about 28,000 kilometers per hour."
-    "Neutron stars are so dense that a teaspoon of their material would weigh billions of tons."
-    "A black hole's gravity is so strong that not even light can escape beyond its event horizon."
-    "The Milky Way's central supermassive black hole is known as Sagittarius A*."
-    "Gravitational waves are ripples in space-time produced by massive cosmic collisions."
-    "Dark matter cannot be seen directly but its gravity shapes galaxies and galaxy clusters."
-    "Dark energy is believed to drive the accelerating expansion of the Universe."
-    "The Milky Way and Andromeda galaxies are expected to merge in about 4.5 billion years."
-    "A supernova is the powerful explosion that marks the end of a massive star's life."
-    "The Sun's core reaches temperatures of around 15 million degrees Celsius."
-    "Proxima Centauri is the closest known star to the Sun."
-    "Thousands of exoplanets have been confirmed orbiting stars beyond our solar system."
-    "Some exoplanets may contain water-rich atmospheres or rocky surfaces."
-    "The largest known structures in the Universe are cosmic filaments stretching across billions of light-years."
-    "Time passes more slowly near extremely strong gravitational fields, as predicted by Einstein's theory of relativity."
     "Voyager 1 is the most distant human-made object from Earth."
-    "Voyager 1 entered interstellar space in 2012 and continues sending scientific data."
-    "Earth's magnetic field protects life by deflecting harmful charged particles from the Sun."
-    "Auroras occur when energetic particles from the Sun collide with gases in Earth's upper atmosphere."
-    "James Webb has captured some of the deepest and sharpest infrared images ever recorded."
-    "Webb is helping scientists understand how the first galaxies formed after the Big Bang."
-    "Some galaxies observed by Webb are more massive than astronomers expected for the early Universe."
-    "Star-forming nebulae contain the gas and dust needed to create new stars and planets."
-    "The asteroid belt between Mars and Jupiter contains millions of rocky objects."
-    "Comets are icy objects that develop glowing tails when they approach the Sun."
-    "Pulsars are rapidly rotating neutron stars that emit regular beams of radio waves."
-    "The Event Horizon Telescope captured the first images of black holes in 2019 and 2022."
-    "The search for Earth-like exoplanets is one of the most exciting areas of modern astronomy."
 )
 
 #############################################
-# build_labels_chain: optional feature — draws
-# pointer/callout labels onto specific
-# coordinates in the video, similar to
-# hand-annotated documentary footage. Fully
-# optional per video: only activates if a file
-# named <basename>.labels.txt exists.
-#
-# File format — one label per line, comma
-# separated:
-#   x,y,Label text here
-# where x,y is the pixel position on the
-# 1280x720 output frame that the label should
-# point at. Box placement, connector line, and
-# edge-avoidance (flips below/left near frame
-# edges) are computed automatically.
-#
-# Visual style matches the rest of the panel:
-# gold-ring/white marker dot (uses the
-# pre-rendered dot_marker.png), gold-tinted
-# connector line, and a label box with a gold
-# accent bar + thin gold outline (same language
-# as the CTA box).
-#
-# Notes/limits:
-#  - Keep label text under ~28 characters — the
-#    box is a fixed width and does not
-#    reflow/resize to fit longer text.
-#  - Best used for points with x > ~370 so
-#    labels don't collide with the left info
-#    panel.
-#  - The connector is a right-angle line
-#    (vertical then horizontal), not a true
-#    diagonal — ffmpeg has no native diagonal
-#    line primitive without much heavier
-#    filters, so this is the practical choice.
-#  - Requires dot_marker.png (generated once at
-#    startup) to be wired in as ffmpeg input
-#    index 2 — see run_video()'s -i list.
-#
-# Sets globals: LABELS_CHAIN (filter string to
-# append), LABELS_OUT (bracketed output label
-# to continue the chain from, e.g. "[base]" if
-# no labels file exists, or the last label's
-# output node otherwise).
+# build_labels_chain — unchanged from original.
 #############################################
 build_labels_chain() {
     local url="$1"
@@ -339,15 +284,6 @@ build_labels_chain() {
     base="${url##*/}"
     base="${base%.*}"
 
-    # FIX: without `local`, every bare loop variable assigned in this
-    # function (i, idx, and the C-style `for ((i=...))` counters below)
-    # is a GLOBAL bash variable. The main stream loop at the bottom of
-    # this file also uses a bare `i` (`for ((i = 0; i < NUM_URLS; i++))`),
-    # and this function runs (via prepare_video_content -> run_video)
-    # once per video inside that loop. Any unscoped `i`/`idx` in here
-    # silently overwrites the outer loop's counter, which is what caused
-    # the stream to get stuck replaying the first video forever instead
-    # of advancing through the whole playlist.
     local i idx
 
     LABELS_CHAIN=""
@@ -358,8 +294,6 @@ build_labels_chain() {
         return 0
     fi
 
-    # First pass: collect valid lines so we know the count up front
-    # (needed to size the marker `split` filter correctly).
     local xs=() ys=() texts=()
     while IFS=',' read -r x y text; do
         x="$(echo "$x" | tr -d '[:space:]')"
@@ -382,18 +316,16 @@ build_labels_chain() {
     local V_OFFSET=70
     local H_OFFSET=40
     local ACCENT_W=4
-    local BOX_GAP=10          # minimum clear space required between two label boxes
+    local BOX_GAP=10
     local LABEL_FONTSIZE=18
-    local LABEL_PAD_L=14      # gap between accent bar and text start
-    local LABEL_PAD_R=16      # gap between text end and box's right edge
-    local AVG_CHAR_W=10       # rough proportional-font width estimate at fontsize 18
-    local BOX_W_MIN=110       # never smaller than this, even for a 1-word label
-    local BOX_W_MAX=260       # never bigger than this, even for a long label
-    local placed_x=() placed_y=() placed_w=()  # boxes already placed this video
+    local LABEL_PAD_L=14
+    local LABEL_PAD_R=16
+    local AVG_CHAR_W=10
+    local BOX_W_MIN=110
+    local BOX_W_MAX=260
+    local placed_x=() placed_y=() placed_w=()
     local k collision tries
 
-    # Split the pre-rendered marker image (input [2:v]) into one copy per
-    # label so each can be overlaid independently at its own coordinate.
     local split_outs=""
     for ((i = 1; i <= n; i++)); do split_outs+="[dm${i}]"; done
     LABELS_CHAIN+="[2:v]split=${n}${split_outs};"
@@ -404,9 +336,6 @@ build_labels_chain() {
         local x="${xs[$i]}" y="${ys[$i]}" text="${texts[$i]}"
         printf '%s' "$text" > "$ASSET_DIR/label${idx}.txt"
 
-        # Auto-size the box to the label's text instead of using one
-        # fixed width for every label — "Pulsar Wind" no longer gets the
-        # same wide box as a much longer phrase.
         local box_w=$(( ${#text} * AVG_CHAR_W + ACCENT_W + LABEL_PAD_L + LABEL_PAD_R ))
         [ "$box_w" -lt "$BOX_W_MIN" ] && box_w=$BOX_W_MIN
         [ "$box_w" -gt "$BOX_W_MAX" ] && box_w=$BOX_W_MAX
@@ -421,11 +350,6 @@ build_labels_chain() {
         fi
         [ "$box_x" -lt 0 ] && box_x=10
 
-        # Collision avoidance: if this box overlaps (within BOX_GAP of)
-        # any box already placed for an earlier label on this video,
-        # push it downward in BOX_H+BOX_GAP steps until it's clear, so
-        # two nearby coordinate labels never end up crowding each other
-        # like "Glowing gas knot" / "Dust cloud region" did before.
         tries=0
         while :; do
             collision=false
@@ -441,9 +365,6 @@ build_labels_chain() {
             done
             [ "$collision" = false ] && break
             box_y=$((box_y + BOX_H + BOX_GAP))
-            # Ran off the bottom of the frame — wrap back to the top and
-            # keep nudging; after a handful of tries just accept overlap
-            # rather than loop forever (extremely dense label sets only).
             if [ $((box_y + BOX_H)) -gt 700 ]; then
                 box_y=20
             fi
@@ -473,15 +394,12 @@ build_labels_chain() {
 
         local n1="lbl${idx}_dot" n2="lbl${idx}_v" n3="lbl${idx}_h" n4="lbl${idx}_bg" n5="lbl${idx}_bar" n6="lbl${idx}_outline" n7="lbl${idx}_txt"
 
-        # Gold-tinted connector line (right-angle: vertical then horizontal)
         LABELS_CHAIN+="[${prev}]drawbox=x=${x}:y=${seg_y_top}:w=2:h=${seg_h}:color=${GOLD}@0.85:t=fill[${n2}];"
         LABELS_CHAIN+="[${n2}]drawbox=x=${h_left}:y=${box_y}:w=${h_w}:h=2:color=${GOLD}@0.85:t=fill[${n3}];"
-        # Label box: dark fill + gold accent bar (left edge) + thin gold outline
         LABELS_CHAIN+="[${n3}]drawbox=x=${box_x}:y=${box_y}:w=${box_w}:h=${BOX_H}:color=black@0.78:t=fill[${n4}];"
         LABELS_CHAIN+="[${n4}]drawbox=x=${box_x}:y=${box_y}:w=${ACCENT_W}:h=${BOX_H}:color=${GOLD}:t=fill[${n5}];"
         LABELS_CHAIN+="[${n5}]drawbox=x=${box_x}:y=${box_y}:w=${box_w}:h=${BOX_H}:color=${GOLD}@0.5:t=1[${n6}];"
         LABELS_CHAIN+="[${n6}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/label${idx}.txt:fontcolor=white:fontsize=${LABEL_FONTSIZE}:x=$((box_x + ACCENT_W + LABEL_PAD_L)):y=$((box_y + (BOX_H - LABEL_FONTSIZE) / 2)):${SHADOW}[${n7}];"
-        # Circular gold-ring/white marker dot, overlaid on top of everything
         LABELS_CHAIN+="[${n7}][dm${idx}]overlay=x=$((x - 8)):y=$((y - 8))[${n1}];"
 
         prev="$n1"
@@ -492,25 +410,10 @@ build_labels_chain() {
 }
 
 #############################################
-# prepare_video_content: (re)loads headlines +
-# facts for the video about to stream, and
-# rebuilds BASE_CHAIN / FACT_END to match.
-#
-# Per-video override: if files named
-#   <basename>.headlines.txt
-#   <basename>.facts.txt
-# exist (basename = video filename without
-# extension — same derivation used for the
-# up-next bumper title), they're used verbatim,
-# in the order given. Useful for curating panel
-# content to match a specific video.
-#
-# Otherwise falls back to the shared pool
-# (galaxy_info.txt / facts.txt / built-in
-# defaults), shuffled into a fresh random order
-# each video so the panel doesn't feel like a
-# static banner repeating identically on every
-# clip.
+# prepare_video_content — same idea as original,
+# plus the cinematic grade / grain / letterbox
+# pass applied right at the top of the chain,
+# before any panel UI is drawn on top.
 #############################################
 prepare_video_content() {
     local url="$1"
@@ -518,13 +421,6 @@ prepare_video_content() {
     base="${url##*/}"
     base="${base%.*}"
 
-    # FIX: same reasoning as build_labels_chain() above — this function
-    # is also called once per video from inside the outer stream loop
-    # (`for ((i = 0; i < NUM_URLS; i++))` at the bottom of this file),
-    # and it reuses bare `i`/`idx` in several for-loops below. Without
-    # `local`, those loops overwrite the outer loop's global `i`, which
-    # made the stream get stuck re-playing the first video forever
-    # instead of advancing through the playlist.
     local i idx
 
     RAW_LINES=()
@@ -607,12 +503,18 @@ prepare_video_content() {
     #########################################
     # Rebuild BASE_CHAIN for this video's content
     #########################################
-    CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
+    local VIDEO_FX="scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black"
+    if [ "$ENABLE_CINE_GRADE" = true ]; then
+        VIDEO_FX+=",eq=contrast=1.06:saturation=1.10:brightness=0.01,vignette=PI/5:mode=backward"
+    fi
+    if [ "$ENABLE_FILM_GRAIN" = true ]; then
+        VIDEO_FX+=",noise=alls=${FILM_GRAIN_STRENGTH}:allf=t+u"
+    fi
+
+    CHAIN="[0:v]${VIDEO_FX}[video];"
     CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
     CHAIN+="[ovl][video]overlay=0:0[base];"
 
-    # Optional coordinate-based callout labels for this video, drawn onto
-    # the raw video before the panel/UI so the panel stays on top.
     build_labels_chain "$url"
     CHAIN+="$LABELS_CHAIN"
 
@@ -626,7 +528,7 @@ prepare_video_content() {
     CHAIN+="[p6]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
     CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
 
-    CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=15:x=313-text_w:y=19[p9];"
+    CHAIN+="[p8]drawtext=fontfile=${FONT}:text='${PANEL_CREDIT}':fontcolor=white@0.85:fontsize=15:x=313-text_w:y=19[p9];"
     CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39[p10];"
     CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/subs.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=57[p10b];"
     CHAIN+="[p10b]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=75[p10c];"
@@ -699,14 +601,15 @@ prepare_video_content() {
 }
 
 #############################################
-# build_final_filter: appends the CTA / next-
-# video countdown / ticker / watermark / border
-# section onto BASE_CHAIN. Called fresh for each
-# video since the countdown depends on that
-# video's probed duration.
+# build_final_filter — CTA / countdown / ticker
+# / watermark / letterbox. next_label lets the
+# caller say "Next video" vs "Switching view"
+# depending on whether the current source is a
+# live feed or a regular clip.
 #############################################
 build_final_filter() {
     local total_duration="$1"
+    local next_label="${2:-Next video}"
     local tail="$BASE_CHAIN"
 
     local CTA_CYCLE=240
@@ -721,7 +624,7 @@ build_final_filter() {
     tail+="[cta_dot]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/cta.txt:fontcolor=white:fontsize=19:x=773:y=633:alpha='${CTA_ALPHA}'[cta_sub];"
 
     if [[ "$total_duration" =~ ^[0-9]+$ ]] && [ "$total_duration" -gt 0 ]; then
-        tail+="[cta_sub]drawtext=fontfile=${FONT}:text='Next video in %{eif\:max(${total_duration}-t\,0)\:d}s':fontcolor=white:fontsize=19:x=773:y=633:enable='${COUNTDOWN_ENABLE}'[cta_final];"
+        tail+="[cta_sub]drawtext=fontfile=${FONT}:text='${next_label} in %{eif\:max(${total_duration}-t\,0)\:d}s':fontcolor=white:fontsize=19:x=773:y=633:enable='${COUNTDOWN_ENABLE}'[cta_final];"
     else
         tail+="[cta_sub]drawtext=fontfile=${FONT}:text='Coming up next...':fontcolor=white@0.85:fontsize=19:x=773:y=633:enable='${COUNTDOWN_ENABLE}'[cta_final];"
     fi
@@ -735,40 +638,46 @@ build_final_filter() {
 
     tail+="[tk6]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.45:fontsize=15:borderw=1.5:bordercolor=black@0.7:x=353:y=655[wm1];"
 
-    # Pulsing ring around the subscribe icon (baked into overlay.png at
-    # SUB_ICON_X/SUB_ICON_Y) — visible for 1s out of every 3s, so it
-    # catches the eye without being a constant distraction.
     local SUB_PULSE_ENABLE="lt(mod(t\,3)\,1)"
     local sub_ring_x=$((SUB_ICON_X - SUB_ICON_R))
     local sub_ring_y=$((SUB_ICON_Y - SUB_ICON_R))
     local sub_ring_d=$((SUB_ICON_R * 2))
     tail+="[wm1]drawbox=x=${sub_ring_x}:y=${sub_ring_y}:w=${sub_ring_d}:h=${sub_ring_d}:color=${GOLD}@0.9:t=3:enable='${SUB_PULSE_ENABLE}'[wm2];"
 
-    tail+="[wm2]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
+    local last_node="wm2"
+    if [ "$ENABLE_LETTERBOX" = true ]; then
+        tail+="[wm2]drawbox=x=0:y=0:w=1280:h=${LETTERBOX_H}:color=black:t=fill[lb1];"
+        tail+="[lb1]drawbox=x=0:y=$((720 - LETTERBOX_H)):w=1280:h=${LETTERBOX_H}:color=black:t=fill[lb2];"
+        last_node="lb2"
+    fi
+
+    tail+="[${last_node}]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
 
     echo "$tail"
 }
 
 #############################################
-# Up-next bumper: short branded title card
-# streamed between videos to reduce drop-off
-# at the loop/transition point.
+# Up-next bumper — unchanged in structure.
 #############################################
 run_bumper() {
     local next_url="$1"
 
     local raw title
-    raw="${next_url##*/}"
-    raw="${raw%.*}"
-    raw="${raw//[-_]/ }"
-    raw="$(echo "$raw" | tr -d '[:space:]')"
-    if [ -z "$raw" ] || [ ${#raw} -lt 3 ]; then
-        title="A New Discovery"
+    if is_youtube_url "$next_url"; then
+        title="Live View From Orbit"
     else
         raw="${next_url##*/}"
         raw="${raw%.*}"
         raw="${raw//[-_]/ }"
-        title=$(echo "$raw" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2); print}')
+        raw="$(echo "$raw" | tr -d '[:space:]')"
+        if [ -z "$raw" ] || [ ${#raw} -lt 3 ]; then
+            title="A New View"
+        else
+            raw="${next_url##*/}"
+            raw="${raw%.*}"
+            raw="${raw//[-_]/ }"
+            title=$(echo "$raw" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2); print}')
+        fi
     fi
 
     local sub_idx=$((RANDOM % ${#BUMPER_MESSAGES[@]}))
@@ -824,39 +733,60 @@ run_bumper() {
 }
 
 #############################################
-# Stream one video with automatic retry on
-# failure/crash (e.g. Bus error, network drop),
-# instead of letting set -e kill the script.
+# Stream one source (file OR live YouTube page)
+# with automatic retry on failure/crash.
 #############################################
 run_video() {
     local url="$1"
     local attempt=1
+    local live_source=false
+    is_youtube_url "$url" && live_source=true
 
-    # Load headlines/facts tied to this specific video (curated file if
-    # present, otherwise a freshly shuffled pool) and rebuild the panel
-    # filter chain to match.
     prepare_video_content "$url"
 
-    # Probe actual duration so the CTA box can show a real countdown to
-    # the next video. Falls back gracefully if probing fails.
-    local duration
-    duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$url" 2>/dev/null || echo "")
-    duration=${duration%.*}
-    [[ "$duration" =~ ^[0-9]+$ ]] || duration=""
-    if [ -n "$duration" ]; then
-        echo "Probed duration: ${duration}s"
+    local duration next_label
+    if [ "$live_source" = true ]; then
+        duration="$SEGMENT_SECONDS"
+        next_label="Switching view"
+        echo "Live source detected — will stream for ${duration}s before rotating."
     else
-        echo "Could not probe duration — countdown will show generic filler text."
+        duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$url" 2>/dev/null || echo "")
+        duration=${duration%.*}
+        [[ "$duration" =~ ^[0-9]+$ ]] || duration=""
+        next_label="Next video"
+        if [ -n "$duration" ]; then
+            echo "Probed duration: ${duration}s"
+        else
+            echo "Could not probe duration — countdown will show generic filler text."
+        fi
     fi
 
     local filter
-    filter=$(build_final_filter "$duration")
+    filter=$(build_final_filter "$duration" "$next_label")
 
     while [ "$attempt" -le "$MAX_RETRIES" ]; do
         echo "----------------------------------------"
         echo "Streaming (attempt ${attempt}/${MAX_RETRIES}):"
         echo "$url"
         echo "----------------------------------------"
+
+        local input_url="$url"
+        local re_flag=(-re)
+
+        if [ "$live_source" = true ]; then
+            echo "Resolving live stream URL via yt-dlp..."
+            input_url=$(resolve_live_stream_url "$url")
+            if [ -z "$input_url" ]; then
+                echo "WARNING: yt-dlp could not resolve a playable stream URL for $url (attempt ${attempt}/${MAX_RETRIES})."
+                attempt=$((attempt + 1))
+                [ "$attempt" -le "$MAX_RETRIES" ] && sleep "$RETRY_DELAY"
+                continue
+            fi
+            # Live sources are already delivered in real time — reading
+            # with -re on top of that just adds latency, so we drop it
+            # for live inputs and keep it only for local/VOD files.
+            re_flag=()
+        fi
 
         set +e
         ffmpeg \
@@ -865,13 +795,14 @@ run_video() {
         -reconnect 1 \
         -reconnect_streamed 1 \
         -reconnect_delay_max 5 \
-        -re \
-        -i "$url" \
+        "${re_flag[@]}" \
+        -i "$input_url" \
         -loop 1 -i overlay.png \
         -loop 1 -i "$DOT_MARKER" \
         -filter_complex "$filter" \
         -map "[final]" \
         -map 0:a? \
+        -t "${duration:-0}" \
         -r 30 \
         -s 1280x720 \
         -c:v libx264 \
@@ -898,7 +829,7 @@ run_video() {
         set -e
 
         if [ "$exit_code" -eq 0 ]; then
-            echo "Video finished normally."
+            echo "Segment finished normally."
             return 0
         fi
 
@@ -908,7 +839,7 @@ run_video() {
             echo "Retrying in ${RETRY_DELAY}s..."
             sleep "$RETRY_DELAY"
         else
-            echo "ERROR: Max retries reached for this video. Moving on."
+            echo "ERROR: Max retries reached for this source. Moving on."
         fi
     done
     return 1
@@ -930,9 +861,24 @@ if [ "$NUM_URLS" -eq 0 ]; then
     exit 1
 fi
 
+# If any source is a YouTube page URL, yt-dlp is required to resolve it
+# to a playable stream. Fail fast with a clear message rather than
+# looping forever on resolution errors.
+NEEDS_YTDLP=false
+for u in "${URLS[@]}"; do
+    if is_youtube_url "$u"; then
+        NEEDS_YTDLP=true
+        echo "Detected live YouTube source: $u"
+    fi
+done
+if [ "$NEEDS_YTDLP" = true ] && ! command -v yt-dlp >/dev/null 2>&1; then
+    echo "ERROR: yt-dlp is required to resolve YouTube live URLs but is not installed."
+    echo "Install it with: pip install -U yt-dlp   (add --break-system-packages if needed)"
+    exit 1
+fi
+
 # Shuffle playback order fresh for every workflow run, so the sequence
-# of videos isn't identical every time the 5-hour cron restarts the
-# container. (Fisher-Yates via `shuf`, always available on Ubuntu.)
+# isn't identical every time the container restarts.
 if [ "$NUM_URLS" -gt 1 ]; then
     mapfile -t URLS < <(printf '%s\n' "${URLS[@]}" | shuf)
     echo "Shuffled playback order for this run:"
@@ -953,7 +899,7 @@ while true; do
             run_bumper "$next_url"
         fi
 
-        echo "Loading next video..."
+        echo "Loading next source..."
         echo ""
     done
 done
