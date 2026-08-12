@@ -22,22 +22,25 @@ if [ -z "${YOUTUBE_API_KEY:-}" ] || [ -z "${YOUTUBE_CHANNEL_ID:-}" ]; then
     SHOW_STATS=false
 fi
 
-# Background music is optional too — if AUDIO_URL isn't provided the
-# stream just uses each video's own audio track, same as before.
-# AUDIO_URL accepts one or more tracks, comma separated, same
-# convention as VIDEO_URL: "track1.mp3,track2.mp3,track3.mp3"
-ENABLE_BG_AUDIO=false
+# Background audio track(s) are optional. AUDIO_URL works exactly like
+# VIDEO_URL: a comma-separated list of one or more URLs. If it's unset,
+# nothing changes — videos stream with their own embedded audio, same
+# as before. If it IS set, the whole thing is treated as one continuous
+# looping playlist for the entire 24/7 stream, independent of which
+# video/bumper happens to be on screen at the time (see the "Background
+# audio playlist" setup block below for how continuity across separate
+# ffmpeg invocations is handled).
+AUDIO_ENABLED=false
 if [ -n "${AUDIO_URL:-}" ]; then
-    ENABLE_BG_AUDIO=true
+    AUDIO_ENABLED=true
 else
-    echo "NOTICE: AUDIO_URL not set — streaming each video's own audio only, no background music."
+    echo "NOTICE: AUDIO_URL not set — streaming with each video's own audio (if any)."
 fi
 
 echo "========================================"
 echo "Starting 24/7 YouTube Stream (Live Earth from Space — ISS Overlay)"
 echo "Output Resolution : 1280x720 (720p — sized for a 2-core CI runner)"
 echo "FPS               : 30"
-echo "Background Audio  : $([ "$ENABLE_BG_AUDIO" = true ] && echo "enabled" || echo "disabled")"
 echo "========================================"
 
 FONT="font.ttf"
@@ -53,18 +56,6 @@ SHADOW="shadowcolor=black@0.6:shadowx=1:shadowy=1"
 HEADLINE_FONTSIZE=21
 HEADLINE_LINE_SPACING=9
 HEADLINE_LINE_H=$((HEADLINE_FONTSIZE + HEADLINE_LINE_SPACING))
-
-#############################################
-# Background audio (optional) — the playlist
-# itself is built below, right after the marker
-# dot is generated (see "Background audio
-# playlist" block). These are just the shared
-# config/state vars for it.
-#############################################
-BG_AUDIO_VOLUME=0.25    # music level when mixed under a video that already has its own audio (0.0-1.0)
-AUDIO_PLAYLIST="$ASSET_DIR/audio_playlist.txt"
-AUDIO_OFFSET=0           # seconds already played from the (looping) playlist — carried forward across videos/bumpers so the music doesn't restart on every switch
-AUDIO_TOTAL_DURATION=0   # summed duration of every track in the playlist, filled in below
 
 # Don't show "N watching now" until the live viewer count reaches this
 # many — a very low number (e.g. "5 watching") reads worse to a new
@@ -151,25 +142,48 @@ fi
 #############################################
 # Background audio playlist (optional)
 #
-# Builds a single ffconcat playlist file out of
-# every URL in AUDIO_URL (comma separated:
-# "url1,url2,url3", same convention as
-# VIDEO_URL). run_video()/run_bumper() play this
-# playlist with -stream_loop -1 so it always has
-# enough audio to cover any video length, and
-# seek into it with AUDIO_OFFSET so the music
-# picks up roughly where it left off on the
-# previous video/bumper instead of restarting
-# from track 1 on every switch. (Because each
-# video/bumper is a separate ffmpeg process, this
-# offset can't be frame-perfect across the whole
-# run — if a single video is long enough to wrap
-# past the end of the playlist, that one segment
-# will loop back to track 1 partway through. For
-# a typical few-minute clip against a normal
-# music playlist this isn't noticeable.)
+# AUDIO_URL, just like VIDEO_URL, is a comma-
+# separated list of one or more URLs — e.g.
+#   AUDIO_URL="https://.../track1.mp3,https://.../track2.mp3,https://.../track3.mp3"
+#
+# All tracks are combined into a single ffmpeg
+# "concat" playlist file and looped forever
+# (-stream_loop -1) as the stream's background
+# audio, for as long as the whole 24/7 stream
+# runs — completely independent of which video
+# or bumper happens to be on screen.
+#
+# CONTINUITY ACROSS SEPARATE ffmpeg PROCESSES:
+# Each video (run_video) and each bumper
+# (run_bumper) is its own ffmpeg invocation, so
+# there's no single long-lived process to just
+# let the audio play through naturally. Instead
+# we track AUDIO_ELAPSED — total seconds of the
+# audio loop consumed so far across the entire
+# stream lifetime — and before every new ffmpeg
+# call we seek (-ss) the audio input to
+# `AUDIO_ELAPSED mod TOTAL_AUDIO_DURATION`. After
+# that segment finishes we add however long it
+# actually ran to AUDIO_ELAPSED. Net effect: the
+# playlist keeps advancing/looping smoothly
+# across video switches and bumpers instead of
+# restarting at track 1 every time.
+#
+# TOTAL_AUDIO_DURATION is the sum of each
+# track's probed duration. If a track's duration
+# can't be probed (bad URL, unsupported format,
+# network hiccup at startup), it's skipped from
+# the total — the loop-resume math becomes
+# approximate rather than exact for that track,
+# but background audio still plays; it just may
+# not resume at a perfectly precise offset.
 #############################################
-if [ "$ENABLE_BG_AUDIO" = true ]; then
+AUDIO_CONCAT_FILE="$ASSET_DIR/audio_playlist.txt"
+AUDIO_PROTOCOL_WHITELIST="file,http,https,tcp,tls,crypto"
+TOTAL_AUDIO_DURATION=0
+AUDIO_ELAPSED=0
+
+if [ "$AUDIO_ENABLED" = true ]; then
     IFS=',' read -ra RAW_AUDIO_URLS <<< "$AUDIO_URL"
     AUDIO_URLS=()
     for a in "${RAW_AUDIO_URLS[@]}"; do
@@ -179,34 +193,26 @@ if [ "$ENABLE_BG_AUDIO" = true ]; then
     done
 
     if [ "${#AUDIO_URLS[@]}" -eq 0 ]; then
-        echo "NOTICE: AUDIO_URL was set but contained no valid entries — background audio disabled."
-        ENABLE_BG_AUDIO=false
+        echo "WARNING: AUDIO_URL was set but contained no valid entries — disabling background audio."
+        AUDIO_ENABLED=false
     else
-        echo "Building background audio playlist (${#AUDIO_URLS[@]} track(s))..."
-        : > "$AUDIO_PLAYLIST"
+        : > "$AUDIO_CONCAT_FILE"
         for a in "${AUDIO_URLS[@]}"; do
-            # ffconcat/concat-demuxer line format: file '<path>', with any
-            # single quotes in the URL escaped.
+            # ffmpeg concat-demuxer line format: file '<url>'
+            # Escape any literal single quotes in the URL so the concat
+            # file itself stays valid.
             esc="${a//\'/\'\\\'\'}"
-            echo "file '${esc}'" >> "$AUDIO_PLAYLIST"
-        done
+            echo "file '${esc}'" >> "$AUDIO_CONCAT_FILE"
 
-        for a in "${AUDIO_URLS[@]}"; do
-            d=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$a" 2>/dev/null || echo "")
-            d=${d%.*}
-            if [[ "$d" =~ ^[0-9]+$ ]] && [ "$d" -gt 0 ]; then
-                AUDIO_TOTAL_DURATION=$((AUDIO_TOTAL_DURATION + d))
+            adur=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$a" 2>/dev/null || echo "")
+            adur=${adur%.*}
+            if [[ "$adur" =~ ^[0-9]+$ ]] && [ "$adur" -gt 0 ]; then
+                TOTAL_AUDIO_DURATION=$((TOTAL_AUDIO_DURATION + adur))
             else
-                echo "WARNING: could not probe duration for audio track, skipping it from the duration total: $a"
+                echo "WARNING: could not probe duration for audio track: $a (loop-resume point may drift slightly because of this track)."
             fi
         done
-
-        if [ "$AUDIO_TOTAL_DURATION" -le 0 ]; then
-            echo "WARNING: could not determine any audio track durations — background audio disabled."
-            ENABLE_BG_AUDIO=false
-        else
-            echo "Background audio playlist ready — total duration ${AUDIO_TOTAL_DURATION}s, looping continuously."
-        fi
+        echo "Background audio enabled: ${#AUDIO_URLS[@]} track(s), total probed loop length ~${TOTAL_AUDIO_DURATION}s"
     fi
 fi
 
@@ -988,24 +994,6 @@ build_final_filter() {
 }
 
 #############################################
-# advance_audio_offset: call after each ffmpeg
-# segment (a run_video attempt, success or
-# failure, or a bumper) with however many
-# seconds it actually streamed for, so the NEXT
-# segment's background-audio seek picks up close
-# to where this one left off instead of jumping
-# back to the start of the playlist. Wraps around
-# AUDIO_TOTAL_DURATION since the playlist itself
-# loops forever.
-#############################################
-advance_audio_offset() {
-    local played="$1"
-    [ "$ENABLE_BG_AUDIO" = true ] || return 0
-    [[ "$played" =~ ^[0-9]+$ ]] || played=0
-    AUDIO_OFFSET=$(( (AUDIO_OFFSET + played) % AUDIO_TOTAL_DURATION ))
-}
-
-#############################################
 # Up-next bumper: short branded title card
 # streamed between videos to reduce drop-off
 # at the loop/transition point.
@@ -1024,13 +1012,12 @@ advance_audio_offset() {
 # stream instead of drifting to 2.5s like it did
 # at 24fps.
 #
-# AUDIO NOTE: when background audio is enabled,
-# the bumper's audio track switches from silence
-# (anullsrc) to the same looping playlist the
-# videos use, picked up at the current
-# AUDIO_OFFSET — so the music keeps playing
-# straight through the transition instead of
-# cutting out for the 5s bumper.
+# AUDIO NOTE: previously this always used a
+# silent anullsrc audio track. When AUDIO_ENABLED
+# is true, it instead continues the same shared
+# background-audio loop as the videos (seeked to
+# AUDIO_ELAPSED, same as run_video), so the music
+# doesn't cut out / go silent during the bumper.
 #############################################
 run_bumper() {
     local next_url="$1"
@@ -1070,26 +1057,27 @@ run_bumper() {
     BFILTER+="[b7]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.4:fontsize=14:x=(w-text_w)/2:y=470[b8];"
     BFILTER+="[b8]fade=t=in:st=0:d=0.5,fade=t=out:st=${fade_out_start}:d=0.6[final]"
 
-    local audio_inputs=(-f lavfi -t "$BUMPER_DURATION" -i anullsrc=r=48000:cl=stereo)
-    local audio_map=(-map 1:a)
-    if [ "$ENABLE_BG_AUDIO" = true ]; then
-        # -stream_loop -1 guarantees the playlist never runs dry even if
-        # AUDIO_OFFSET lands near the end; -shortest below trims the
-        # output back down to the bumper's fixed BUMPER_DURATION.
-        audio_inputs=(-ss "$AUDIO_OFFSET" -stream_loop -1 -f concat -safe 0 -i "$AUDIO_PLAYLIST")
-        audio_map=(-map 1:a:0)
+    # Second input (index 1) is either the shared background-audio loop
+    # (seeked to wherever it currently is) or, if no AUDIO_URL was
+    # configured, the original silent placeholder track — either way it
+    # stays mapped as -map 1:a below, so nothing else has to change.
+    local second_audio_input=()
+    if [ "$AUDIO_ENABLED" = true ]; then
+        local audio_seek=0
+        [ "$TOTAL_AUDIO_DURATION" -gt 0 ] && audio_seek=$(( AUDIO_ELAPSED % TOTAL_AUDIO_DURATION ))
+        second_audio_input=(-ss "$audio_seek" -stream_loop -1 -safe 0 -protocol_whitelist "$AUDIO_PROTOCOL_WHITELIST" -i "$AUDIO_CONCAT_FILE")
+    else
+        second_audio_input=(-f lavfi -t "$BUMPER_DURATION" -i anullsrc=r=48000:cl=stereo)
     fi
 
-    local start_ts end_ts elapsed
-    start_ts=$(date +%s)
     ffmpeg \
     -hide_banner \
     -loglevel warning \
     -loop 1 -t "$BUMPER_DURATION" -i overlay.png \
-    "${audio_inputs[@]}" \
+    "${second_audio_input[@]}" \
     -filter_complex "$BFILTER" \
     -map "[final]" \
-    "${audio_map[@]}" \
+    -map 1:a \
     -r 30 \
     -s 1280x720 \
     -c:v libx264 \
@@ -1112,9 +1100,12 @@ run_bumper() {
     -shortest \
     -f flv \
     "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}" || echo "WARNING: bumper failed, continuing to next video"
-    end_ts=$(date +%s)
-    elapsed=$((end_ts - start_ts))
-    advance_audio_offset "$elapsed"
+
+    # Advance the shared audio clock by the (fixed) bumper duration so
+    # the next video picks the music up right where the bumper left it.
+    if [ "$AUDIO_ENABLED" = true ]; then
+        AUDIO_ELAPSED=$(( AUDIO_ELAPSED + BUMPER_DURATION ))
+    fi
 }
 
 #############################################
@@ -1122,20 +1113,29 @@ run_bumper() {
 # failure/crash (e.g. Bus error, network drop),
 # instead of letting set -e kill the script.
 #
-# AUDIO NOTE: when background audio is enabled,
-# an extra input (the looping playlist, seeked to
-# AUDIO_OFFSET) is added and mixed under the
-# video's own audio track with amix — or, if the
-# video has no audio track at all, played on its
-# own. Either way it's mapped in as [aout] instead
-# of the old plain "-map 0:a?".
+# AUDIO NOTE: when AUDIO_ENABLED is true, each
+# ffmpeg attempt below adds the shared background
+# audio playlist as an extra input (seeked to
+# AUDIO_ELAPSED mod TOTAL_AUDIO_DURATION) and maps
+# it in place of the video's own audio. After the
+# attempt ends — success or failure — the actual
+# wall-clock time that attempt ran for is added to
+# AUDIO_ELAPSED, so the very next ffmpeg call
+# (whether that's a retry of this same video, the
+# next video, or a bumper) resumes the music from
+# the correct point instead of restarting it.
 #############################################
 run_video() {
     local url="$1"
     local attempt=1
 
+    # Load headlines/facts tied to this specific video (curated file if
+    # present, otherwise a freshly shuffled pool) and rebuild the panel
+    # filter chain to match.
     prepare_video_content "$url"
 
+    # Probe actual duration so the CTA box can show a real countdown to
+    # the next video. Falls back gracefully if probing fails.
     local duration
     duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$url" 2>/dev/null || echo "")
     duration=${duration%.*}
@@ -1149,42 +1149,29 @@ run_video() {
     local filter
     filter=$(build_final_filter "$duration")
 
-    # Does this video already carry its own audio track? Decides whether
-    # background music (when enabled) gets mixed under it or just plays
-    # on its own.
-    local has_audio=false
-    if [ "$ENABLE_BG_AUDIO" = true ]; then
-        if ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$url" 2>/dev/null | grep -q .; then
-            has_audio=true
-            echo "This video has its own audio — background music will be mixed underneath at volume ${BG_AUDIO_VOLUME}."
-        else
-            echo "This video has no audio track — background music will play on its own."
-        fi
-        if [ "$has_audio" = true ]; then
-            filter+=";[0:a]volume=1.0[origa];[3:a]volume=${BG_AUDIO_VOLUME}[bga];[origa][bga]amix=inputs=2:duration=first:dropout_transition=2[aout]"
-        else
-            filter+=";[3:a]volume=1.0[aout]"
-        fi
-    fi
-
     while [ "$attempt" -le "$MAX_RETRIES" ]; do
         echo "----------------------------------------"
         echo "Streaming (attempt ${attempt}/${MAX_RETRIES}):"
         echo "$url"
         echo "----------------------------------------"
 
-        local audio_inputs=()
-        local map_audio_args=(-map 0:a?)
-        if [ "$ENABLE_BG_AUDIO" = true ]; then
-            # -stream_loop -1 so the playlist can never run out mid-video
-            # (the -shortest flag below trims audio+video to the video's
-            # actual length, same as before).
-            audio_inputs=(-ss "$AUDIO_OFFSET" -stream_loop -1 -f concat -safe 0 -i "$AUDIO_PLAYLIST")
-            map_audio_args=(-map "[aout]")
+        # Background audio input for this attempt: seek into the shared
+        # playlist wherever AUDIO_ELAPSED currently sits, then loop it
+        # forever (the -shortest flag on the main ffmpeg call trims it
+        # down to the video's actual length).
+        local audio_input=()
+        local audio_map=(-map 0:a?)
+        if [ "$AUDIO_ENABLED" = true ]; then
+            local audio_seek=0
+            [ "$TOTAL_AUDIO_DURATION" -gt 0 ] && audio_seek=$(( AUDIO_ELAPSED % TOTAL_AUDIO_DURATION ))
+            echo "Background audio resume position: ${audio_seek}s (loop length ~${TOTAL_AUDIO_DURATION}s)"
+            audio_input=(-ss "$audio_seek" -stream_loop -1 -safe 0 -protocol_whitelist "$AUDIO_PROTOCOL_WHITELIST" -i "$AUDIO_CONCAT_FILE")
+            audio_map=(-map 3:a)
         fi
 
-        local start_ts end_ts elapsed
-        start_ts=$(date +%s)
+        local seg_start
+        seg_start=$(date +%s)
+
         set +e
         ffmpeg \
         -hide_banner \
@@ -1196,10 +1183,10 @@ run_video() {
         -i "$url" \
         -loop 1 -i overlay.png \
         -loop 1 -i "$DOT_MARKER" \
-        "${audio_inputs[@]}" \
+        "${audio_input[@]}" \
         -filter_complex "$filter" \
         -map "[final]" \
-        "${map_audio_args[@]}" \
+        "${audio_map[@]}" \
         -r 30 \
         -s 1280x720 \
         -c:v libx264 \
@@ -1224,9 +1211,11 @@ run_video() {
         "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
         local exit_code=$?
         set -e
-        end_ts=$(date +%s)
-        elapsed=$((end_ts - start_ts))
-        advance_audio_offset "$elapsed"
+
+        if [ "$AUDIO_ENABLED" = true ]; then
+            local seg_elapsed=$(( $(date +%s) - seg_start ))
+            AUDIO_ELAPSED=$(( AUDIO_ELAPSED + seg_elapsed ))
+        fi
 
         if [ "$exit_code" -eq 0 ]; then
             echo "Video finished normally."
