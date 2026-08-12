@@ -70,4 +70,5 @@ jobs:
             -e YOUTUBE_STREAM_KEY="${{ secrets.YOUTUBE_STREAM_KEY }}" \
             -e YOUTUBE_API_KEY="${{ secrets.YOUTUBE_API_KEY }}" \
             -e YOUTUBE_CHANNEL_ID="${{ secrets.YOUTUBE_CHANNEL_ID }}" \
+            -e AUDIO_URL="${{ secrets.AUDIO_URL }}" \
             "$IMAGE:latest"
