@@ -1065,7 +1065,7 @@ run_bumper() {
     if [ "$AUDIO_ENABLED" = true ]; then
         local audio_seek=0
         [ "$TOTAL_AUDIO_DURATION" -gt 0 ] && audio_seek=$(( AUDIO_ELAPSED % TOTAL_AUDIO_DURATION ))
-        second_audio_input=(-ss "$audio_seek" -stream_loop -1 -safe 0 -protocol_whitelist "$AUDIO_PROTOCOL_WHITELIST" -i "$AUDIO_CONCAT_FILE")
+        second_audio_input=(-ss "$audio_seek" -stream_loop -1 -f concat -safe 0 -protocol_whitelist "$AUDIO_PROTOCOL_WHITELIST" -i "$AUDIO_CONCAT_FILE")
     else
         second_audio_input=(-f lavfi -t "$BUMPER_DURATION" -i anullsrc=r=48000:cl=stereo)
     fi
@@ -1165,7 +1165,7 @@ run_video() {
             local audio_seek=0
             [ "$TOTAL_AUDIO_DURATION" -gt 0 ] && audio_seek=$(( AUDIO_ELAPSED % TOTAL_AUDIO_DURATION ))
             echo "Background audio resume position: ${audio_seek}s (loop length ~${TOTAL_AUDIO_DURATION}s)"
-            audio_input=(-ss "$audio_seek" -stream_loop -1 -safe 0 -protocol_whitelist "$AUDIO_PROTOCOL_WHITELIST" -i "$AUDIO_CONCAT_FILE")
+            audio_input=(-ss "$audio_seek" -stream_loop -1 -f concat -safe 0 -protocol_whitelist "$AUDIO_PROTOCOL_WHITELIST" -i "$AUDIO_CONCAT_FILE")
             audio_map=(-map 3:a)
         fi
 
